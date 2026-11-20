@@ -1,0 +1,16 @@
+{
+  "columns": ["drive_x", "drive_y"],
+  "measurements": [
+    {"key": "a", "value": "0", "unit": "mL/s", "design": [1, 0]},
+    {"key": "b", "value": "0", "unit": "L/min", "design": [0, 1]}
+  ],
+  "wiring": [
+    {"name": "in", "offset": "0", "unit": "mL/s", "coefficients": [1, 0]},
+    {"name": "out-a", "offset": "1", "unit": "mL/s", "coefficients": [1, 0]},
+    {"name": "out-b", "offset": "1", "unit": "mL/s", "coefficients": [0, 1]},
+    {"name": "twice", "offset": "0", "unit": "mL/s", "coefficients": [2, 0]},
+    {"name": "zero", "offset": "0", "unit": "mL/s", "coefficients": [0, 0]},
+    {"name": "one", "offset": "1", "unit": "mL/s", "coefficients": [0, 0]},
+    {"name": "sum", "offset": "0", "unit": "mL/s", "coefficients": [1, 1]}
+  ]
+}
