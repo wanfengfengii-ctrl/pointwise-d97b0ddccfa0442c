@@ -29,3 +29,13 @@ python3 -B demo.py workday
 `mL/s` 是统一流量单位。`L/min` 精确乘 `50/3`，公开接线的截距与系数一起换算，实测零与负流量均合法。数值、判定、排序和编码采用精确运算。导出集合是升序数组，每个分量为 `[下端, 上端, 下端闭合, 上端闭合]`。`null` 是相应方向的无界端且开放。有理端点用约分字符串。非有理二次端点用 `[a,b,c,i]` 表示首系数为正的本原整数多项式 `a·r²+b·r+c` 的第 `i` 个实根，低根索引为 0。闭合且两端相等表示孤点，空数组表示空集。`RatioSet.contains()` 用精确值核对成员。
 
 回归覆盖混合单位及恰预算签发、重复通道及非法单位拒绝、秩不足及预算不足、两种同边缘接线的断源复核、零入口、比例孤点、代数边界复领、更正和重复初始化、未知通道及报告号、两次写入之间与提交阶段的事务回滚。
+
+## 联合流量容差（V2）
+
+关站后只凭指定 V2 校准件离线核定一组具名有理闭区间。`evidence.issue.issue_tolerance_calibration(fitted, register)` 按冻结接线签发 V2 件，正文 `version` 为 2，含件号、修订号、修订指纹、具名通道、公开中心、未缩放 Gram 形状 `W G^-1 W^T`、最低残差地板 `residual_floor` 和原预算 `limit`。它自足保全公开读值的完整联合可达关系和每个可达组合的精确最低总残差平方和；原测、设计行和私有参数名仍留在台架库。`register.get(artifact_id)` 按件号领取登记原文，未知件号报 `KeyError`，有效更正产生新修订并仍按原件号领取同一正文。
+
+离线入口 `review.assess.assess_tolerance_and_publish(connection, artifact_text, intervals)` 只访问归档。`intervals` 是非空列表或元组，每项为 `[name, lower, upper]`（或元组），端点接受非布尔整数、有理字符串和 `Fraction`，允许单点和省略通道；重复或未知通道、反向区间、非法端点或非法结构以及 V1 件、重复 JSON 字段和不自洽证据一律报 `ValueError` 且无本次成果。整组区间由同一次校准满足：在全部实参数上求精确最低总残差平方和（凸二次规划的活动集枚举，全程 `Fraction` 运算，支持降秩、线性依赖和恒定通道）。全域无解时最低值为 `None`、预算资格为 `False`，仍签发报告；有解返回精确 `Fraction`，恰等原预算也判 `True`。
+
+返回 `(report, receipt)`。报告 `ToleranceReport` 具 `report_id`、`artifact_id`、`revision_id`、`revision_fingerprint`、`limit`（原预算 `Fraction`）、`intervals`（按通道名升序、端点均为 `Fraction` 的三元组序列）、`minimum_residual_sum`、`within_budget` 属性；回执沿用 `reports.receipts.Receipt`。报告与回执在同一 SQLite 事务提交，失败无新增且可重试，写入错误按 V1 方式传播。`reports.retrieve.retrieve_tolerance_report(connection, report_id)` 只访问归档领取原报告和回执，未知号报 `reports.retrieve.ReportNotFound`；勘误、重新初始化和重开归档后按号领取固定结果与出处。
+
+容差样例在 `samples/tolerance.json`。`python3 -B demo.py workday` 在原变比演示之外增加 `POINTWISE_TOLERANCE` 剧本：关断源库后签发、勘误另签新修订、重开归档按最初报告号复领原报告（原件最低值 4，勘误后 0）。`python3 -B demo.py offline-tolerance ARCHIVE` 从标准输入读取 `{"artifact": <V2 正文>, "intervals": [...]}` 并输出报告与回执 JSON。

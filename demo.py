@@ -10,12 +10,12 @@ from pathlib import Path
 
 from bench.store import BenchLedger
 from calibration.fit import fit_frozen_revision
-from evidence.issue import issue_calibration
+from evidence.issue import issue_calibration, issue_tolerance_calibration
 from evidence.register import IssueRegister
 from reports.publish import initialize_archive
 from reports.records import encode_ratio_set
-from reports.retrieve import retrieve_report
-from review.assess import assess_and_publish
+from reports.retrieve import retrieve_report, retrieve_tolerance_report
+from review.assess import assess_and_publish, assess_tolerance_and_publish
 from review.request import RatioRequest
 
 
@@ -48,10 +48,108 @@ def offline_report(archive, artifact_text, inlet, outlet):
     return json.loads(completed.stdout)
 
 
+def offline_tolerance(archive, artifact_text, intervals):
+    completed = subprocess.run(
+        [sys.executable, '-B', str(ROOT / 'demo.py'), 'offline-tolerance', str(archive)],
+        input=json.dumps({'artifact': artifact_text, 'intervals': intervals}),
+        text=True, capture_output=True, encoding='utf-8',
+    )
+    if completed.returncode:
+        raise RuntimeError(
+            f'offline tolerance review exited {completed.returncode}: {completed.stderr.strip()}'
+        )
+    return json.loads(completed.stdout)
+
+
 def _freeze_and_issue(ledger, register):
     revision = ledger.freeze_current()
     artifact = issue_calibration(fit_frozen_revision(revision, '1'), register)
     return artifact, register.get(artifact.artifact_id)
+
+
+def _tolerance_snapshot(report, receipt):
+    return {
+        'report_id': report.report_id,
+        'artifact_id': report.artifact_id,
+        'revision_id': report.revision_id,
+        'revision_fingerprint': report.revision_fingerprint,
+        'limit': str(report.limit),
+        'intervals': [[iv.name, str(iv.lower), str(iv.upper)] for iv in report.intervals],
+        'minimum_residual_sum': (
+            None if report.minimum_residual_sum is None else str(report.minimum_residual_sum)
+        ),
+        'within_budget': report.within_budget,
+        'receipt': asdict(receipt),
+    }
+
+
+def run_tolerance_day(directory):
+    """Source-disconnected tolerance issuance, correction and reopen retrieval."""
+    source = directory / 'tolerance-bench.sqlite3'
+    archive = directory / 'tolerance-archive.sqlite3'
+    cases = {case['name']: case for case in
+             json.loads((ROOT / 'samples' / 'tolerance.json').read_text(encoding='utf-8'))}
+    floor = cases['residual-floor']
+
+    with closing(sqlite3.connect(source)) as connection:
+        ledger, register = BenchLedger(connection), IssueRegister(connection)
+        ledger.initialize()
+        register.initialize()
+        ledger.accept_batch(**floor['batch'])
+        revision = ledger.freeze_current()
+        artifact = issue_tolerance_calibration(fit_frozen_revision(revision, floor['limit']), register)
+        original_text = register.get(artifact.artifact_id)
+        request = floor['requests'][0]['intervals']
+
+    # Close the source bench: the offline process sees only the V2 envelope.
+    first_payload = offline_tolerance(archive, original_text, request)
+
+    with closing(sqlite3.connect(source)) as connection:
+        ledger, register = BenchLedger(connection), IssueRegister(connection)
+        ledger.initialize()
+        register.initialize()
+        ledger.correct_readings(floor['correction'])
+        corrected = ledger.freeze_current()
+        corrected_artifact = issue_tolerance_calibration(
+            fit_frozen_revision(corrected, floor['limit']), register
+        )
+        corrected_text = register.get(corrected_artifact.artifact_id)
+        if register.get(artifact.artifact_id) != original_text:
+            raise AssertionError('tolerance correction changed the original V2 envelope')
+
+    corrected_payload = offline_tolerance(archive, corrected_text, request)
+
+    with closing(sqlite3.connect(archive)) as connection:
+        initialize_archive(connection)
+        reopened = _tolerance_snapshot(
+            *retrieve_tolerance_report(connection, first_payload['report_id'])
+        )
+        corrected_reopened = _tolerance_snapshot(
+            *retrieve_tolerance_report(connection, corrected_payload['report_id'])
+        )
+
+    expected_first = {
+        'minimum_residual_sum': '4', 'within_budget': True, 'limit': floor['limit'],
+    }
+    expected_corrected = {
+        'minimum_residual_sum': '0', 'within_budget': True, 'limit': floor['limit'],
+    }
+    for payload, expected in ((first_payload, expected_first), (corrected_payload, expected_corrected)):
+        for key, value in expected.items():
+            if payload[key] != value:
+                raise AssertionError(f'TOLERANCE_MISMATCH {key}: {payload[key]!r} != {value!r}')
+    if reopened != first_payload or corrected_reopened != corrected_payload:
+        raise AssertionError('reopened tolerance reports do not match the original issuance')
+    return {
+        'case_id': 'T2',
+        'artifact': artifact.artifact_id,
+        'corrected_artifact': corrected_artifact.artifact_id,
+        'original_revision': revision.revision_id,
+        'corrected_revision': corrected.revision_id,
+        'original': first_payload,
+        'corrected': corrected_payload,
+        'reopened_original_report': reopened,
+    }
 
 
 def run_workday(directory):
@@ -140,6 +238,8 @@ def main(argv=None):
     offline.add_argument('archive', type=Path)
     offline.add_argument('inlet')
     offline.add_argument('outlet')
+    tolerance = commands.add_parser('offline-tolerance')
+    tolerance.add_argument('archive', type=Path)
     args = parser.parse_args(argv)
     if args.command == 'offline':
         with closing(sqlite3.connect(args.archive)) as connection:
@@ -147,10 +247,21 @@ def main(argv=None):
             report, receipt = assess_and_publish(connection, sys.stdin.read(), RatioRequest(args.inlet, args.outlet))
         print(json.dumps(_snapshot(report, receipt), ensure_ascii=True))
         return 0
+    if args.command == 'offline-tolerance':
+        payload = json.loads(sys.stdin.read())
+        with closing(sqlite3.connect(args.archive)) as connection:
+            initialize_archive(connection)
+            report, receipt = assess_tolerance_and_publish(
+                connection, payload['artifact'], payload['intervals']
+            )
+        print(json.dumps(_tolerance_snapshot(report, receipt), ensure_ascii=True))
+        return 0
     with tempfile.TemporaryDirectory(prefix='chengpu-') as directory:
         scenario, original_report = run_workday(Path(directory))
+        tolerance_scenario = run_tolerance_day(Path(directory))
         print('POINTWISE_SCENARIO ' + json.dumps(scenario, ensure_ascii=False, sort_keys=True))
         print(json.dumps({'retrieved_original_report': original_report}, ensure_ascii=False, sort_keys=True))
+        print('POINTWISE_TOLERANCE ' + json.dumps(tolerance_scenario, ensure_ascii=False, sort_keys=True))
     return 0
 
 

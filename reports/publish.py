@@ -2,6 +2,7 @@ import sqlite3
 
 from reports.receipts import make_receipt
 from reports.records import ReportRecord, encode_ratio_set
+from reports.tolerance_records import ToleranceReport, encode_tolerance_report
 
 
 def _require_idle(connection):
@@ -31,6 +32,21 @@ def initialize_archive(connection: sqlite3.Connection):
                 receipt_id TEXT NOT NULL UNIQUE
             )
         ''')
+        connection.execute('''
+            CREATE TABLE IF NOT EXISTS tolerance_reports (
+                report_id INTEGER PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                revision_id TEXT NOT NULL,
+                revision_fingerprint TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+        ''')
+        connection.execute('''
+            CREATE TABLE IF NOT EXISTS tolerance_receipts (
+                report_id INTEGER PRIMARY KEY REFERENCES tolerance_reports(report_id),
+                receipt_id TEXT NOT NULL UNIQUE
+            )
+        ''')
 
 
 def publish_report(connection, *, artifact_id, revision_id, revision_fingerprint, inlet, outlet, ratios):
@@ -49,3 +65,26 @@ def publish_report(connection, *, artifact_id, revision_id, revision_fingerprint
             INSERT INTO report_receipts (report_id, receipt_id) VALUES (?, ?)
         ''', (receipt.report_id, receipt.receipt_id))
     return report, receipt
+
+
+def publish_tolerance_report(connection, *, artifact_id, revision_id, revision_fingerprint, report):
+    _require_idle(connection)
+    encoded = encode_tolerance_report(report)
+    connection.execute('BEGIN IMMEDIATE')
+    with connection:
+        cursor = connection.execute('''
+            INSERT INTO tolerance_reports
+                (artifact_id, revision_id, revision_fingerprint, payload)
+            VALUES (?, ?, ?, ?)
+        ''', (artifact_id, revision_id, revision_fingerprint, encoded))
+        report_id = cursor.lastrowid
+        stored = ToleranceReport(
+            report_id, artifact_id, revision_id, revision_fingerprint,
+            report.limit, report.intervals, report.minimum_residual_sum,
+            report.within_budget,
+        )
+        receipt = make_receipt(report_id)
+        connection.execute('''
+            INSERT INTO tolerance_receipts (report_id, receipt_id) VALUES (?, ?)
+        ''', (receipt.report_id, receipt.receipt_id))
+    return stored, receipt

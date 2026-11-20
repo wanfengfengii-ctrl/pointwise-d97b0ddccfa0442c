@@ -2,7 +2,7 @@ import sqlite3
 from uuid import uuid4
 
 from evidence.channels import PublicReadings
-from evidence.codec import CalibrationArtifact, encode_artifact
+from evidence.codec import CalibrationArtifact, ToleranceCalibrationArtifact, encode_artifact, encode_tolerance_artifact
 
 
 class IssueRegister:
@@ -25,11 +25,7 @@ class IssueRegister:
                 )
             ''')
 
-    def record(self, revision_id, fingerprint, readings: PublicReadings):
-        artifact = CalibrationArtifact(
-            f'{revision_id}/c{uuid4().hex}', revision_id, fingerprint, readings
-        )
-        body = encode_artifact(artifact)
+    def _record(self, revision_id, fingerprint, artifact, body):
         self._begin()
         with self.connection:
             source = self.connection.execute('''
@@ -41,6 +37,22 @@ class IssueRegister:
                 INSERT INTO issued_calibrations (artifact_id, revision_id, body) VALUES (?, ?, ?)
             ''', (artifact.artifact_id, revision_id, body))
         return artifact
+
+    def record(self, revision_id, fingerprint, readings: PublicReadings):
+        artifact = CalibrationArtifact(
+            f'{revision_id}/c{uuid4().hex}', revision_id, fingerprint, readings
+        )
+        return self._record(revision_id, fingerprint, artifact, encode_artifact(artifact))
+
+    def record_tolerance(self, revision_id, fingerprint, readings: PublicReadings,
+                         residual_floor, limit):
+        artifact = ToleranceCalibrationArtifact(
+            f'{revision_id}/t{uuid4().hex}', revision_id, fingerprint, readings,
+            residual_floor, limit,
+        )
+        return self._record(
+            revision_id, fingerprint, artifact, encode_tolerance_artifact(artifact)
+        )
 
     def get(self, artifact_id):
         row = self.connection.execute('''
